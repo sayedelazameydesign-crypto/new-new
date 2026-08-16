@@ -1,0 +1,1 @@
+ALTER TABLE `users` ADD `preferredModel` varchar(128) DEFAULT 'gemini-2.5-flash';

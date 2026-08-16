@@ -175,3 +175,23 @@
     }
   }
 }
+
+
+/* محور — technical dark RTL workspace */
+html, body, #root { min-height: 100%; }
+html { direction: rtl; }
+body { background: #080b12; color: #e2e8f0; }
+.technical-grid {
+  background-image:
+    linear-gradient(rgba(125, 211, 252, 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(125, 211, 252, 0.045) 1px, transparent 1px),
+    radial-gradient(circle at 16% 18%, rgba(244, 114, 182, 0.08), transparent 24%),
+    radial-gradient(circle at 82% 72%, rgba(103, 232, 249, 0.08), transparent 24%);
+  background-size: 32px 32px, 32px 32px, auto, auto;
+}
+.wire-orbit { position: relative; box-shadow: 0 0 80px rgba(103, 232, 249, 0.08); }
+.wire-orbit::before, .wire-orbit::after { content: ""; position: absolute; inset: -13px; border: 1px solid rgba(125, 211, 252, 0.16); border-radius: 34px; transform: rotate(22deg); }
+.wire-orbit::after { inset: -24px; border-color: rgba(244, 114, 182, 0.12); transform: rotate(-38deg); }
+.prose pre { direction: ltr; text-align: left; border: 1px solid rgba(125, 211, 252, 0.15); background: rgba(2, 6, 23, 0.75); }
+.prose code { direction: ltr; }
+button, select, input, textarea { font-family: inherit; }
