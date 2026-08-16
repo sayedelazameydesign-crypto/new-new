@@ -19,10 +19,14 @@ const COMMANDS: Record<string, string> = {
 };
 
 export function applyQuickCommand(input: string) {
-  const firstToken = input.trim().split(/\s+/)[0];
+  const tokens = input.trim().split(/\s+/).filter(Boolean);
+  const firstToken = tokens[0] || "";
   const instruction = COMMANDS[firstToken];
   if (!instruction) return { cleanInput: input.trim(), command: null, instruction: null };
-  return { cleanInput: input.trim().slice(firstToken.length).trim(), command: firstToken, instruction };
+
+  let contentStart = 1;
+  while (tokens[contentStart] === firstToken) contentStart += 1;
+  return { cleanInput: tokens.slice(contentStart).join(" ").trim(), command: firstToken, instruction };
 }
 
 export function buildSystemPrompt(command?: string | null, commandInstruction?: string | null) {

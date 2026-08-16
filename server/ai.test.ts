@@ -10,6 +10,12 @@ describe("Arabic assistant AI helpers", () => {
     expect(buildSystemPrompt(parsed.command, parsed.instruction)).toContain("التوجيه السريع");
   });
 
+  it("removes repeated leading quick commands", () => {
+    const parsed = applyQuickCommand("/شرح /شرح الذكاء الاصطناعي");
+    expect(parsed.command).toBe("/شرح");
+    expect(parsed.cleanInput).toBe("الذكاء الاصطناعي");
+  });
+
   it("round-trips encrypted secrets without exposing plaintext format", () => {
     const secret = "example-api-key-123456";
     const encrypted = encryptSecret(secret);
