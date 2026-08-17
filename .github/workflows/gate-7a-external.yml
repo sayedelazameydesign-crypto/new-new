@@ -169,7 +169,9 @@ jobs:
               emit_match_metadata credential_value_pattern "$match" >&2
               credential_match_found=1
             done <<< "$credential_matches"
-            [ "$credential_match_found" -eq 1 ] && secret_found=1
+            if [ "$credential_match_found" -eq 1 ]; then
+              secret_found=1
+            fi
           fi
 
           echo '--- synthetic fixture diagnostic self-test ---'
