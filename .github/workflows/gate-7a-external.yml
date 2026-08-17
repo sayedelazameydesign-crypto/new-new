@@ -135,8 +135,9 @@ jobs:
             echo "Secret assignment scan failed (git grep exit $assignment_status)." >&2
             exit "$assignment_status"
           fi
-          if [ -n "$assignment_matches" ]; then
+          if [[ -n "${assignment_matches//[[:space:]]/}" ]]; then
             while IFS= read -r match; do
+              [[ -z "${match//[[:space:]]/}" ]] && continue
               case "$match" in
                 *'process.env'*|*'import.meta.env'*|*'${'*|*CHANGE_ME*|*REPLACE_ME*|*example*|*placeholder*|*dummy*|*mock*|*test*) continue ;;
               esac
@@ -153,12 +154,15 @@ jobs:
             echo "Credential value scan failed (git grep exit $credential_status)." >&2
             exit "$credential_status"
           fi
-          if [ -n "$credential_matches" ]; then
+          if [[ -n "${credential_matches//[[:space:]]/}" ]]; then
+            credential_match_found=0
             echo 'Credential-like match metadata (value redacted):' >&2
             while IFS= read -r match; do
+              [[ -z "${match//[[:space:]]/}" ]] && continue
               emit_match_metadata credential_value_pattern "$match" >&2
+              credential_match_found=1
             done <<< "$credential_matches"
-            secret_found=1
+            [ "$credential_match_found" -eq 1 ] && secret_found=1
           fi
 
           echo '--- synthetic fixture diagnostic self-test ---'
