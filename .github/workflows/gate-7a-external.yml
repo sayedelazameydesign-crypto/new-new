@@ -2,6 +2,12 @@ name: Gate 7A External Container Verification
 
 on:
   workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: "Full 40-character commit SHA to verify"
+        required: true
+        default: a3a5750b2e184481a34e64467db4f0514516ad33
+        type: string
   push:
     branches:
       - main
@@ -15,6 +21,7 @@ env:
   HOST_PORT: "18080"
   CONTAINER_PORT: "3000"
   CONTAINER_NAME: celiaos-gate-7a
+  EXPECTED_SHA_DEFAULT: a3a5750b2e184481a34e64467db4f0514516ad33
 
 jobs:
   container-verification:
@@ -25,6 +32,48 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+
+      - name: Verify immutable ref integrity
+        shell: bash
+        env:
+          DISPATCH_EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          expected_sha="${DISPATCH_EXPECTED_SHA:-$EXPECTED_SHA_DEFAULT}"
+          actual_head_sha="${GITHUB_SHA:-}"
+          workflow_sha="${GITHUB_WORKFLOW_SHA:-UNKNOWN}"
+          repository="${GITHUB_REPOSITORY:-UNKNOWN}"
+          ref="${GITHUB_REF:-UNKNOWN}"
+          event="${GITHUB_EVENT_NAME:-UNKNOWN}"
+          run_id="${GITHUB_RUN_ID:-UNKNOWN}"
+          run_attempt="${GITHUB_RUN_ATTEMPT:-UNKNOWN}"
+
+          printf '%s\n' \
+            "REF_METADATA repository=$repository" \
+            "REF_METADATA ref=$ref" \
+            "REF_METADATA event=$event" \
+            "REF_METADATA workflow_sha=$workflow_sha" \
+            "REF_METADATA run_id=$run_id" \
+            "REF_METADATA run_attempt=$run_attempt"
+
+          if [[ ! "$expected_sha" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo 'REF_INTEGRITY=FAIL REASON=INVALID_EXPECTED_SHA' >&2
+            exit 1
+          fi
+          if [[ ! "$actual_head_sha" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo 'REF_INTEGRITY=FAIL REASON=INVALID_ACTUAL_HEAD_SHA' >&2
+            exit 1
+          fi
+
+          expected_sha="${expected_sha,,}"
+          actual_head_sha="${actual_head_sha,,}"
+          printf '%s\n' "REF_METADATA expected_sha=$expected_sha" "REF_METADATA actual_head_sha=$actual_head_sha"
+
+          if [[ "$expected_sha" != "$actual_head_sha" ]]; then
+            echo 'REF_INTEGRITY=FAIL REASON=SHA_MISMATCH' >&2
+            exit 1
+          fi
+          echo 'REF_INTEGRITY=PASS'
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -40,10 +89,43 @@ jobs:
           test ! -e .env
           test ! -e .env.local
           test ! -e .env.production
-          assignment_pattern='(^|[^A-Za-z0-9_])(API[_-]?KEY|SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE[_-]?KEY|ACCESS[_-]?KEY)[A-Za-z0-9_ -]*[=:][[:space:]]*["'"']?[A-Za-z0-9+/=_-]{20,}["'"']?([,;}]|$)'
+          assignment_pattern='(^|[^A-Za-z0-9_])(API[_-]?KEY|SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE[_-]?KEY|ACCESS[_-]?KEY)[A-Za-z0-9_ -]*[=:][[:space:]]*["'"'"']?[A-Za-z0-9+/=_-]{20,}["'"'"']?([,;}]|$)'
           credential_value_pattern='-----BEGIN ([A-Z]+ )?PRIVATE KEY-----|https?://[^/[:space:]@]+:[^/[:space:]@]+@|(AIza|sk-)[A-Za-z0-9_-]{20,}'
           scan_paths=(. ':(exclude).github/*' ':(exclude)todo.md' ':(exclude)*.md' ':(exclude)pnpm-lock.yaml' ':(exclude)template.json' ':(exclude)**/*.test.*' ':(exclude)**/*.spec.*')
           secret_found=0
+          fixture_dir=$(mktemp -d)
+          cleanup() {
+            rm -rf "$fixture_dir"
+          }
+          trap cleanup EXIT
+          emit_match_metadata() {
+            local rule="$1"
+            local record="$2"
+            record=$(printf '%s' "$record" | sed $'s/\033\\[[0-9;]*m//g')
+            EMIT_FILE="${record%%:*}"
+            local remainder="${record#*:}"
+            EMIT_LINE="${remainder%%:*}"
+            EMIT_FILE="${EMIT_FILE//$'\r'/}"
+            EMIT_LINE="${EMIT_LINE//$'\r'/}"
+            EMIT_FILE="${EMIT_FILE//[[:space:]]/}"
+            EMIT_LINE="${EMIT_LINE//[[:space:]]/}"
+            local matched_text="${remainder#*:}"
+            EMIT_SUBPATTERN='assignment_pattern'
+            if [ "$rule" = 'credential_value_pattern' ]; then
+              if grep -Eq -- '-----BEGIN ([A-Z]+ )?PRIVATE KEY-----' <<< "$matched_text"; then
+                EMIT_SUBPATTERN='private_key_marker'
+              elif grep -Eq -- 'https?://[^/[:space:]@]+:[^/[:space:]@]+@' <<< "$matched_text"; then
+                EMIT_SUBPATTERN='url_userinfo'
+              elif grep -Eq -- '(AIza|sk-)[A-Za-z0-9_-]{20,}' <<< "$matched_text"; then
+                EMIT_SUBPATTERN='provider_token_prefix'
+              else
+                EMIT_SUBPATTERN='credential_value_pattern'
+              fi
+            fi
+            local digest
+            digest=$(printf '%s' "$matched_text" | sha256sum | awk '{print $1}')
+            printf 'MATCH_FILE=%s MATCH_LINE=%s MATCH_RULE=%s MATCH_SUBPATTERN=%s MATCH_SHA256=%s\n' "$EMIT_FILE" "$EMIT_LINE" "$rule" "$EMIT_SUBPATTERN" "$digest"
+          }
 
           set +e
           assignment_matches=$(git grep -nI -E "$assignment_pattern" -- "${scan_paths[@]}")
@@ -58,7 +140,7 @@ jobs:
               case "$match" in
                 *'process.env'*|*'import.meta.env'*|*'${'*|*CHANGE_ME*|*REPLACE_ME*|*example*|*placeholder*|*dummy*|*mock*|*test*) continue ;;
               esac
-              echo "Potential literal secret assignment: $match" >&2
+              emit_match_metadata assignment_pattern "$match" >&2
               secret_found=1
             done <<< "$assignment_matches"
           fi
@@ -72,10 +154,76 @@ jobs:
             exit "$credential_status"
           fi
           if [ -n "$credential_matches" ]; then
-            echo 'Potential hardcoded credential-like value found in tracked source/config files:' >&2
-            printf '%s\n' "$credential_matches" >&2
+            echo 'Credential-like match metadata (value redacted):' >&2
+            while IFS= read -r match; do
+              emit_match_metadata credential_value_pattern "$match" >&2
+            done <<< "$credential_matches"
             secret_found=1
           fi
+
+          echo '--- synthetic fixture diagnostic self-test ---'
+          git -C "$fixture_dir" init -q
+          git -C "$fixture_dir" config user.email gate-7a@example.invalid
+          git -C "$fixture_dir" config user.name gate-7a-fixture
+          mkdir -p "$fixture_dir/src"
+          fixture_assignment_value="synthetic_diagnostic_value_$(printf '%s' '1234567890')"
+          fixture_credential_value="$(printf '%s%s' 'AIza' 'SyntheticDiagnosticValue1234567890')"
+          export FIXTURE_ASSIGNMENT_VALUE="$fixture_assignment_value" FIXTURE_CREDENTIAL_VALUE="$fixture_credential_value"
+          printf 'TOKEN=%s\nVALUE=%s\n' "$fixture_assignment_value" "$fixture_credential_value" > "$fixture_dir/src/fixture.env"
+          git -C "$fixture_dir" add src/fixture.env
+          git -C "$fixture_dir" commit -qm fixture
+          set +e
+          fixture_assignment_matches=$(git -C "$fixture_dir" grep -nI -E "$assignment_pattern" -- .)
+          fixture_assignment_status=$?
+          fixture_credential_matches=$(git -C "$fixture_dir" grep -nI -E -e "$credential_value_pattern" -- .)
+          fixture_credential_status=$?
+          set -e
+          test "$fixture_assignment_status" -le 1
+          test "$fixture_credential_status" -le 1
+          test -n "$fixture_assignment_matches"
+          test -n "$fixture_credential_matches"
+          fixture_assignment_match="${fixture_assignment_matches%%$'\n'*}"
+          fixture_credential_match="${fixture_credential_matches%%$'\n'*}"
+          emit_match_metadata assignment_pattern "$fixture_assignment_match" > /tmp/celiaos-gate7a-fixture-assignment-metadata
+          emit_match_metadata credential_value_pattern "$fixture_credential_match" > /tmp/celiaos-gate7a-fixture-credential-metadata
+          fixture_metadata=$(cat /tmp/celiaos-gate7a-fixture-assignment-metadata /tmp/celiaos-gate7a-fixture-credential-metadata)
+          python3 - /tmp/celiaos-gate7a-fixture-assignment-metadata /tmp/celiaos-gate7a-fixture-credential-metadata <<'PY'
+          import os
+          import pathlib
+          import sys
+
+          expected = [
+              (pathlib.Path(sys.argv[1]).read_text().strip(), 'src/fixture.env', '1', 'assignment_pattern', 'assignment_pattern'),
+              (pathlib.Path(sys.argv[2]).read_text().strip(), 'src/fixture.env', '2', 'credential_value_pattern', 'provider_token_prefix'),
+          ]
+          for line, expected_file, expected_line, expected_rule, expected_subpattern in expected:
+              fields = dict(item.split('=', 1) for item in line.split())
+              actual_file = ''.join(char for char in fields['MATCH_FILE'] if char.isprintable())
+              if not (actual_file == expected_file or actual_file.endswith('/' + expected_file)):
+                  raise SystemExit('metadata FILE mismatch')
+              if fields['MATCH_LINE'] != expected_line:
+                  raise SystemExit('metadata LINE mismatch')
+              if fields['MATCH_RULE'] != expected_rule:
+                  raise SystemExit('metadata RULE mismatch')
+              if fields['MATCH_SUBPATTERN'] != expected_subpattern:
+                  raise SystemExit('metadata SUBPATTERN mismatch')
+              if any(value in line for value in (os.environ['FIXTURE_ASSIGNMENT_VALUE'], os.environ['FIXTURE_CREDENTIAL_VALUE'])):
+                  raise SystemExit('metadata redaction failure')
+          PY
+          if grep -Fq "$fixture_assignment_value" /tmp/celiaos-gate7a-fixture-assignment-metadata /tmp/celiaos-gate7a-fixture-credential-metadata || grep -Fq "$fixture_credential_value" /tmp/celiaos-gate7a-fixture-assignment-metadata /tmp/celiaos-gate7a-fixture-credential-metadata; then
+            echo 'Synthetic secret value appeared in diagnostic output.' >&2
+            exit 1
+          fi
+          rm -f /tmp/celiaos-gate7a-fixture-assignment-metadata /tmp/celiaos-gate7a-fixture-credential-metadata
+          unset fixture_metadata
+          fixture_secret_found=0
+          [ -n "$fixture_assignment_matches" ] && fixture_secret_found=1
+          [ -n "$fixture_credential_matches" ] && fixture_secret_found=1
+          fixture_exit=0
+          [ "$fixture_secret_found" -ne 0 ] && fixture_exit=1
+          test "$fixture_exit" -eq 1
+          echo 'SYNTHETIC_FIXTURE=PASS: file, line, rule, subpattern, redaction, and exit 1 verified.'
+
           if [ "$secret_found" -ne 0 ]; then
             exit 1
           fi
