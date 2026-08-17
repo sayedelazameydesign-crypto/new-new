@@ -235,6 +235,9 @@ jobs:
           test "$fixture_exit" -eq 1
           echo 'SYNTHETIC_FIXTURE=PASS: file, line, rule, subpattern, redaction, and exit 1 verified.'
 
+          echo "ASSIGNMENT_MATCH_BYTES=$(printf '%s' "$assignment_matches" | wc -c)"
+          echo "CREDENTIAL_MATCH_BYTES=$(printf '%s' "$credential_matches" | wc -c)"
+          echo "SECRET_FOUND_FLAG=$secret_found"
           if [ "$secret_found" -ne 0 ]; then
             exit 1
           fi
