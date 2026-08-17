@@ -1,0 +1,154 @@
+name: Gate 7A External Container Verification
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: read
+
+env:
+  IMAGE_NAME: celiaos-gate-7a:${{ github.sha }}
+  HOST_PORT: "18080"
+  CONTAINER_PORT: "3000"
+  CONTAINER_NAME: celiaos-gate-7a
+
+jobs:
+  container-verification:
+    name: Build and smoke-test production container
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Verify required files and absence of local secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f Dockerfile
+          test -f .dockerignore
+          test -f pnpm-lock.yaml
+          test -f package.json
+          test ! -e .env
+          test ! -e .env.local
+          test ! -e .env.production
+          if grep -RInE '(^|[^A-Za-z0-9_])(DATABASE_URL|JWT_SECRET|GEMINI_API_KEY|BUILT_IN_FORGE_API_KEY|VITE_FRONTEND_FORGE_API_KEY)\s*=' . \
+            --exclude-dir=.git --exclude-dir=node_modules --exclude='*.lock' --exclude='*.md'; then
+            echo 'Potential literal secret assignment found in the build context.' >&2
+            exit 1
+          fi
+
+      - name: Build image with Docker Buildx (test-before-push)
+        shell: bash
+        run: |
+          set -euo pipefail
+          started_ms=$(date +%s%3N)
+          docker buildx build \
+            --file Dockerfile \
+            --tag "$IMAGE_NAME" \
+            --load \
+            .
+          finished_ms=$(date +%s%3N)
+          echo "IMAGE_BUILD_DURATION_MS=$((finished_ms - started_ms))"
+          echo "IMAGE_SIZE_BYTES=$(docker image inspect "$IMAGE_NAME" --format '{{.Size}}')"
+          echo 'This workflow stops after local image verification; no external publication step is configured.'
+
+      - name: Run container and execute bounded smoke tests
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          container_started=0
+          cleanup() {
+            set +e
+            if [ "$container_started" -eq 1 ]; then
+              echo '--- container logs before cleanup ---'
+              docker logs "$CONTAINER_NAME" 2>&1 || true
+              docker stop --time 10 "$CONTAINER_NAME" >/tmp/celiaos-gate7a-stop.log 2>&1 || true
+              exit_code=$(docker inspect "$CONTAINER_NAME" --format '{{.State.ExitCode}}' 2>/dev/null || printf 'unavailable')
+              echo "CONTAINER_EXIT_CODE=$exit_code"
+              case "$exit_code" in
+                0|143) echo "GRACEFUL_TERMINATION=PASS EXIT_CODE=$exit_code" ;;
+                *)
+                  echo 'Container did not terminate cleanly.' >&2
+                  docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+                  exit 1
+                  ;;
+              esac
+              docker rm "$CONTAINER_NAME" >/dev/null 2>&1 || true
+            fi
+          }
+          trap cleanup EXIT
+
+          started_ms=$(date +%s%3N)
+          docker run --detach \
+            --name "$CONTAINER_NAME" \
+            --publish "$HOST_PORT:$CONTAINER_PORT" \
+            --env NODE_ENV=production \
+            --env PORT="$CONTAINER_PORT" \
+            "$IMAGE_NAME"
+          container_started=1
+
+          ready=0
+          for attempt in $(seq 1 30); do
+            status=$(curl --silent --output /tmp/celiaos-health.json --write-out '%{http_code}' "http://127.0.0.1:$HOST_PORT/api/health" || true)
+            if [ "$status" = '200' ]; then
+              ready=1
+              break
+            fi
+            if ! docker ps --format '{{.Names}}' | grep -Fxq "$CONTAINER_NAME"; then
+              echo 'Container exited before readiness.' >&2
+              docker logs "$CONTAINER_NAME" 2>&1 || true
+              exit 1
+            fi
+            sleep 2
+          done
+          if [ "$ready" -ne 1 ]; then
+            echo 'Readiness timeout exceeded.' >&2
+            exit 1
+          fi
+          finished_ms=$(date +%s%3N)
+          echo "CONTAINER_STARTUP_MS=$((finished_ms - started_ms))"
+
+          test "$(cat /tmp/celiaos-health.json)" = '{"ok":true}'
+
+          curl --fail --silent --show-error "http://127.0.0.1:$HOST_PORT/" -o /tmp/celiaos-index.html
+          grep -Eiq '<!doctype html|<html|id=["'"']root["'"']' /tmp/celiaos-index.html
+          echo 'STATIC=PASS'
+
+          trpc_status=$(curl --silent --output /tmp/celiaos-auth-me.json --write-out '%{http_code}' "http://127.0.0.1:$HOST_PORT/api/trpc/auth.me")
+          case "$trpc_status" in
+            200|401|403) echo "TRPC_AUTH_ME=PASS HTTP_STATUS=$trpc_status" ;;
+            *) echo "Unexpected tRPC auth.me status: $trpc_status" >&2; cat /tmp/celiaos-auth-me.json; exit 1 ;;
+          esac
+
+          oauth_status=$(curl --silent --output /tmp/celiaos-oauth.json --write-out '%{http_code}' "http://127.0.0.1:$HOST_PORT/api/oauth/callback")
+          test "$oauth_status" = '400'
+          echo 'AUTH_OAUTH_ROUTE=PASS HTTP_STATUS=400 for missing code/state without secrets'
+
+          echo '--- authenticated SSE mock integration inside built image ---'
+          docker exec \
+            --env NODE_ENV=test \
+            "$CONTAINER_NAME" \
+            corepack pnpm exec vitest run server/sse.http.test.ts --reporter=dot
+          echo 'AUTHENTICATED_SSE_MOCK=PASS'
+
+          echo '--- resource observation ---'
+          docker stats --no-stream --format 'CPU={{.CPUPerc}} MEM={{.MemUsage}}' "$CONTAINER_NAME"
+
+          echo '--- running container logs ---'
+          docker logs "$CONTAINER_NAME" 2>&1 | tee /tmp/celiaos-gate7a.log
+          if grep -Eiq 'uncaught exception|unhandled rejection|EADDRINUSE|fatal crash' /tmp/celiaos-gate7a.log; then
+            echo 'Crash signature found in container logs.' >&2
+            exit 1
+          fi
+
+          echo 'SECURITY=PASS: no workflow secrets or external publication step is defined.'
+          echo 'CONTAINER_SMOKE=PASS'
