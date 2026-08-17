@@ -319,7 +319,7 @@ jobs:
           test "$(cat /tmp/celiaos-health.json)" = '{"ok":true}'
 
           curl --fail --silent --show-error "http://127.0.0.1:$HOST_PORT/" -o /tmp/celiaos-index.html
-          grep -Eiq '<!doctype html|<html|id=["'"']root["'"']' /tmp/celiaos-index.html
+          grep -Eiq '<!doctype html|<html|id="root"' /tmp/celiaos-index.html
           echo 'STATIC=PASS'
 
           trpc_status=$(curl --silent --output /tmp/celiaos-auth-me.json --write-out '%{http_code}' "http://127.0.0.1:$HOST_PORT/api/trpc/auth.me")
