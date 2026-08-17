@@ -11,6 +11,7 @@ import { serveStatic, setupVite } from "./vite";
 import { sdk } from "./sdk";
 import { getApiKey, getConversation, listMessages, addMessage, updateConversation } from "../db";
 import { applyQuickCommand, buildSystemPrompt, chooseFirstWorking, decryptSecret, fallbackModels, modelInfo, streamModel, summarizeConversation, type ModelId } from "../ai";
+import { installGracefulShutdown } from "./gracefulShutdown";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -34,6 +35,7 @@ async function findAvailablePort(startPort: number = 3000): Promise<number> {
 async function startServer() {
   const app = express();
   const server = createServer(app);
+  installGracefulShutdown(server);
   // Configure body parser with larger size limit for file uploads
   app.use(express.json({ limit: "50mb" }));
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
