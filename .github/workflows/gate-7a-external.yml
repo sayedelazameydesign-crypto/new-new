@@ -93,6 +93,7 @@ jobs:
           credential_value_pattern='-----BEGIN ([A-Z]+ )?PRIVATE KEY-----|https?://[^/[:space:]@]+:[^/[:space:]@]+@|(AIza|sk-)[A-Za-z0-9_-]{20,}'
           scan_paths=(. ':(exclude).github/*' ':(exclude)todo.md' ':(exclude)*.md' ':(exclude)pnpm-lock.yaml' ':(exclude)template.json' ':(exclude)**/*.test.*' ':(exclude)**/*.spec.*')
           secret_found=0
+          export TERM=dumb
           fixture_dir=$(mktemp -d)
           cleanup() {
             rm -rf "$fixture_dir"
@@ -128,7 +129,7 @@ jobs:
           }
 
           set +e
-          assignment_matches=$(git grep -nI -E "$assignment_pattern" -- "${scan_paths[@]}")
+          assignment_matches=$(git -c color.ui=false -c color.grep=false grep -nI -E "$assignment_pattern" -- "${scan_paths[@]}")
           assignment_status=$?
           set -e
           if [ "$assignment_status" -gt 1 ]; then
@@ -137,7 +138,8 @@ jobs:
           fi
           if [[ -n "${assignment_matches//[[:space:]]/}" ]]; then
             while IFS= read -r match; do
-              [[ -z "${match//[[:space:]]/}" ]] && continue
+              match=$(printf '%s' "$match" | sed $'s/\033\\[[0-9;]*[[:alpha:]]//g' | tr -d '\000-\010\013\014\016-\037\177')
+              [[ -z "${match//[[:space:]]/}" || "$match" != *:*:* ]] && continue
               case "$match" in
                 *'process.env'*|*'import.meta.env'*|*'${'*|*CHANGE_ME*|*REPLACE_ME*|*example*|*placeholder*|*dummy*|*mock*|*test*) continue ;;
               esac
@@ -147,7 +149,7 @@ jobs:
           fi
 
           set +e
-          credential_matches=$(git grep -nI -E -e "$credential_value_pattern" -- "${scan_paths[@]}")
+          credential_matches=$(git -c color.ui=false -c color.grep=false grep -nI -E -e "$credential_value_pattern" -- "${scan_paths[@]}")
           credential_status=$?
           set -e
           if [ "$credential_status" -gt 1 ]; then
@@ -158,7 +160,8 @@ jobs:
             credential_match_found=0
             echo 'Credential-like match metadata (value redacted):' >&2
             while IFS= read -r match; do
-              [[ -z "${match//[[:space:]]/}" ]] && continue
+              match=$(printf '%s' "$match" | sed $'s/\033\\[[0-9;]*[[:alpha:]]//g' | tr -d '\000-\010\013\014\016-\037\177')
+              [[ -z "${match//[[:space:]]/}" || "$match" != *:*:* ]] && continue
               emit_match_metadata credential_value_pattern "$match" >&2
               credential_match_found=1
             done <<< "$credential_matches"
@@ -177,9 +180,9 @@ jobs:
           git -C "$fixture_dir" add src/fixture.env
           git -C "$fixture_dir" commit -qm fixture
           set +e
-          fixture_assignment_matches=$(git -C "$fixture_dir" grep -nI -E "$assignment_pattern" -- .)
+          fixture_assignment_matches=$(git -C "$fixture_dir" -c color.ui=false -c color.grep=false grep -nI -E "$assignment_pattern" -- .)
           fixture_assignment_status=$?
-          fixture_credential_matches=$(git -C "$fixture_dir" grep -nI -E -e "$credential_value_pattern" -- .)
+          fixture_credential_matches=$(git -C "$fixture_dir" -c color.ui=false -c color.grep=false grep -nI -E -e "$credential_value_pattern" -- .)
           fixture_credential_status=$?
           set -e
           test "$fixture_assignment_status" -le 1
